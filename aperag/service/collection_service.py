@@ -265,32 +265,35 @@ class CollectionService:
             rerank_model = await self._get_default_rerank_model(user)
             
             if rerank_model:
-                # Add rerank step using RerankNodeRunner
+                # Add rerank node to the flow
                 try:
-                    from aperag.flow.runners.rerank import RerankNodeRunner, RerankInput, SystemInput
+                    # Create a new flow for reranking
+                    rerank_node_id = "rerank"
+                    rerank_nodes = {
+                        rerank_node_id: NodeInstance(
+                            id=rerank_node_id,
+                            type="rerank",
+                            input_values={
+                                "model": rerank_model["model"],
+                                "model_service_provider": rerank_model["provider"],
+                                "custom_llm_provider": rerank_model.get("custom_llm_provider", rerank_model["provider"]),
+                                "docs": docs
+                            }
+                        )
+                    }
                     
-                    # Create rerank node runner
-                    rerank_runner = RerankNodeRunner()
-                    
-                    # Prepare input for rerank node
-                    rerank_input = RerankInput(
-                        model=rerank_model["model"],
-                        model_service_provider=rerank_model["provider"],
-                        custom_llm_provider=rerank_model.get("custom_llm_provider", rerank_model["provider"]),
-                        docs=docs
+                    rerank_flow = FlowInstance(
+                        name="rerank",
+                        title="Rerank",
+                        nodes=rerank_nodes,
+                        edges=[]
                     )
                     
-                    # Prepare system input
-                    system_input = SystemInput(
-                        query=query,
-                        user=user
-                    )
+                    # Execute rerank flow
+                    rerank_result, _ = await engine.execute_flow(rerank_flow, {"query": query, "user": user})
                     
-                    # Run rerank node
-                    rerank_output, _ = await rerank_runner.run(rerank_input, system_input)
-                    
-                    # Update docs with reranked results
-                    docs = rerank_output.docs
+                    if rerank_result and rerank_node_id in rerank_result:
+                        docs = rerank_result[rerank_node_id].docs
                     
                 except Exception as e:
                     # Log error but continue with original results
