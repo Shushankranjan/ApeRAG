@@ -265,28 +265,33 @@ class CollectionService:
             rerank_model = await self._get_default_rerank_model(user)
             
             if rerank_model:
-                # Add rerank step
+                # Add rerank step using RerankNodeRunner
                 try:
-                    from aperag.llm.rerank.rerank_service import RerankService
+                    from aperag.flow.runners.rerank import RerankNodeRunner, RerankInput, SystemInput
                     
-                    # Get API key for the provider
-                    api_key = await self.db_ops.query_provider_api_key(rerank_model["provider"], user)
+                    # Create rerank node runner
+                    rerank_runner = RerankNodeRunner()
                     
-                    if api_key:
-                        # Get provider details
-                        llm_provider = await self.db_ops.query_llm_provider_by_name(rerank_model["provider"])
-                        
-                        if llm_provider and llm_provider.base_url:
-                            # Create rerank service
-                            rerank_service = RerankService(
-                                rerank_provider=rerank_model.get("custom_llm_provider", rerank_model["provider"]),
-                                rerank_model=rerank_model["model"],
-                                rerank_service_url=llm_provider.base_url,
-                                rerank_service_api_key=api_key,
-                            )
-                            
-                            # Rerank the documents
-                            docs = await rerank_service.async_rerank(query, docs)
+                    # Prepare input for rerank node
+                    rerank_input = RerankInput(
+                        model=rerank_model["model"],
+                        model_service_provider=rerank_model["provider"],
+                        custom_llm_provider=rerank_model.get("custom_llm_provider", rerank_model["provider"]),
+                        docs=docs
+                    )
+                    
+                    # Prepare system input
+                    system_input = SystemInput(
+                        query=query,
+                        user=user
+                    )
+                    
+                    # Run rerank node
+                    rerank_output, _ = await rerank_runner.run(rerank_input, system_input)
+                    
+                    # Update docs with reranked results
+                    docs = rerank_output.docs
+                    
                 except Exception as e:
                     # Log error but continue with original results
                     import logging
