@@ -258,6 +258,60 @@ class CollectionService:
 
         # Process search results
         docs = result.get(end_node_id, {}).docs
+        
+        # Apply reranking if we have documents
+        if docs:
+            # Find a rerank model with the "default_for_rerank" tag
+            rerank_model = await self._get_default_rerank_model(user)
+            
+            if rerank_model:
+                # Add rerank step
+                try:
+                    from aperag.llm.rerank.rerank_service import RerankService
+                    
+                    # Get API key for the provider
+                    api_key = await self.db_ops.query_provider_api_key(rerank_model["provider"], user)
+                    
+                    if api_key:
+                        # Get provider details
+                        llm_provider = await self.db_ops.query_llm_provider_by_name(rerank_model["provider"])
+                        
+                        if llm_provider and llm_provider.base_url:
+                            # Create rerank service
+                            rerank_service = RerankService(
+                                rerank_provider=rerank_model.get("custom_llm_provider", rerank_model["provider"]),
+                                rerank_model=rerank_model["model"],
+                                rerank_service_url=llm_provider.base_url,
+                                rerank_service_api_key=api_key,
+                            )
+                            
+                            # Rerank the documents
+                            docs = await rerank_service.async_rerank(query, docs)
+                except Exception as e:
+                    # Log error but continue with original results
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Reranking failed: {str(e)}")
+            else:
+                # Apply fallback strategy if no rerank model is available
+                # 1. Place graph search results first (they typically have better quality)
+                # 2. Sort remaining vector and fulltext results by score in descending order
+                graph_results = []
+                other_results = []
+                
+                for doc in docs:
+                    recall_type = doc.metadata.get("recall_type", "")
+                    if recall_type == "graph_search":
+                        graph_results.append(doc)
+                    else:
+                        other_results.append(doc)
+                
+                # Sort other results by score in descending order
+                other_results.sort(key=lambda x: x.score if x.score is not None else 0, reverse=True)
+                
+                # Combine results with graph results first
+                docs = graph_results + other_results
+
         items = []
         for idx, doc in enumerate(docs):
             items.append(
@@ -289,6 +343,35 @@ class CollectionService:
             items=items,
             created=record.gmt_created.isoformat(),
         )
+
+    async def _get_default_rerank_model(self, user: str) -> dict:
+        """
+        Find a rerank model with the "default_for_rerank" tag.
+        Returns the first model found or None if no model is available.
+        """
+        from aperag.schema.view_models import TagFilterCondition
+        from aperag.service.llm_available_model_service import llm_available_model_service
+        
+        # Create a tag filter to find models with "default_for_rerank" tag
+        tag_filter = [TagFilterCondition(tags=["default_for_rerank"], operation="AND")]
+        
+        # Get available models with the filter
+        model_configs = await llm_available_model_service.get_available_models(
+            user, view_models.TagFilterRequest(tag_filters=tag_filter)
+        )
+        
+        # Look for rerank models in the result
+        for provider in model_configs.items:
+            if provider.rerank and len(provider.rerank) > 0:
+                # Return the first rerank model found
+                return {
+                    "provider": provider.name,
+                    "model": provider.rerank[0]["model"],
+                    "custom_llm_provider": provider.rerank[0].get("custom_llm_provider"),
+                }
+        
+        # No rerank model found
+        return None
 
     async def list_searches(self, user: str, collection_id: str) -> view_models.SearchResultList:
         from aperag.exceptions import CollectionNotFoundException
