@@ -265,12 +265,17 @@ class CollectionService:
             rerank_model = await self._get_default_rerank_model(user)
             
             if rerank_model:
-                # Add rerank node to the flow
-                try:
-                    # Create a new flow for reranking
-                    rerank_node_id = "rerank"
-                    rerank_nodes = {
-                        rerank_node_id: NodeInstance(
+                # Verify if the model has an API key configured
+                api_key = await async_db_ops.query_provider_api_key(rerank_model["provider"], user)
+                
+                if api_key:
+                    # Add rerank node to the existing flow instead of creating a separate FlowInstance
+                    try:
+                        # Add rerank node to the existing flow
+                        rerank_node_id = "rerank"
+                        
+                        # Add the rerank node to the existing nodes dictionary
+                        flow.nodes[rerank_node_id] = NodeInstance(
                             id=rerank_node_id,
                             type="rerank",
                             input_values={
@@ -280,26 +285,26 @@ class CollectionService:
                                 "docs": docs
                             }
                         )
-                    }
-                    
-                    rerank_flow = FlowInstance(
-                        name="rerank",
-                        title="Rerank",
-                        nodes=rerank_nodes,
-                        edges=[]
-                    )
-                    
-                    # Execute rerank flow
-                    rerank_result, _ = await engine.execute_flow(rerank_flow, {"query": query, "user": user})
-                    
-                    if rerank_result and rerank_node_id in rerank_result:
-                        docs = rerank_result[rerank_node_id].docs
-                    
-                except Exception as e:
-                    # Log error but continue with original results
+                        
+                        # Add an edge from the merge node to the rerank node
+                        flow.edges.append(Edge(source=end_node_id, target=rerank_node_id))
+                        
+                        # Re-execute the flow with the added rerank node
+                        result, _ = await engine.execute_flow(flow, {"query": query, "user": user})
+                        
+                        if result and rerank_node_id in result:
+                            docs = result[rerank_node_id].docs
+                        
+                    except Exception as e:
+                        # Log error but continue with original results
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"Reranking failed: {str(e)}")
+                else:
+                    # Log warning that the model doesn't have an API key configured
                     import logging
                     logger = logging.getLogger(__name__)
-                    logger.error(f"Reranking failed: {str(e)}")
+                    logger.warning(f"Rerank model {rerank_model['model']} with provider {rerank_model['provider']} has no API key configured. Skipping reranking.")
             else:
                 # Apply fallback strategy if no rerank model is available
                 # 1. Place graph search results first (they typically have better quality)
