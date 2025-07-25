@@ -269,12 +269,11 @@ class CollectionService:
                 api_key = await async_db_ops.query_provider_api_key(rerank_model["provider"], user)
                 
                 if api_key:
-                    # Add rerank node to the existing flow instead of creating a separate FlowInstance
+                    # Add rerank node to the flow and execute it
                     try:
-                        # Add rerank node to the existing flow
                         rerank_node_id = "rerank"
                         
-                        # Add the rerank node to the existing nodes dictionary
+                        # Add the rerank node to the flow
                         flow.nodes[rerank_node_id] = NodeInstance(
                             id=rerank_node_id,
                             type="rerank",
@@ -282,16 +281,15 @@ class CollectionService:
                                 "model": rerank_model["model"],
                                 "model_service_provider": rerank_model["provider"],
                                 "custom_llm_provider": rerank_model.get("custom_llm_provider", rerank_model["provider"]),
-                                "docs": docs
+                                "docs": "{{ nodes." + end_node_id + ".output.docs }}"  # Use reference to merge node output
                             }
                         )
                         
                         # Add an edge from the merge node to the rerank node
                         flow.edges.append(Edge(source=end_node_id, target=rerank_node_id))
                         
-                        # Re-execute the flow with the added rerank node
+                        # Execute the flow with the rerank node
                         result, _ = await engine.execute_flow(flow, {"query": query, "user": user})
-                        
                         if result and rerank_node_id in result:
                             docs = result[rerank_node_id].docs
                         
@@ -304,7 +302,26 @@ class CollectionService:
                     # Log warning that the model doesn't have an API key configured
                     import logging
                     logger = logging.getLogger(__name__)
-                    logger.warning(f"Rerank model {rerank_model['model']} with provider {rerank_model['provider']} has no API key configured. Skipping reranking.")
+                    logger.warning(f"Rerank model {rerank_model['model']} with provider {rerank_model['provider']} has no API key configured. Using fallback rerank strategy.")
+                    
+                    # Apply fallback rerank strategy
+                    # 1. Place graph search results first (they typically have better quality)
+                    # 2. Sort remaining vector and fulltext results by score in descending order
+                    graph_results = []
+                    other_results = []
+                    
+                    for doc in docs:
+                        recall_type = doc.metadata.get("recall_type", "")
+                        if recall_type == "graph_search":
+                            graph_results.append(doc)
+                        else:
+                            other_results.append(doc)
+                    
+                    # Sort other results by score in descending order
+                    other_results.sort(key=lambda x: x.score if x.score is not None else 0, reverse=True)
+                    
+                    # Combine results with graph results first
+                    docs = graph_results + other_results
             else:
                 # Apply fallback strategy if no rerank model is available
                 # 1. Place graph search results first (they typically have better quality)
